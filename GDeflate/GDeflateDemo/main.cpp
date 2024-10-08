@@ -266,6 +266,8 @@ struct GDeflateTileStream
 };
 #pragma pack(pop)
 
+#define WRITE_COMPRESSED_HEADER
+
 int DecompressContent(
     std::vector<std::filesystem::path> const& sourcePaths,
     std::filesystem::path const& destinationPath,
@@ -285,6 +287,18 @@ int DecompressContent(
         {
             auto header = reinterpret_cast<const GDeflateTileStream*>(fileContents.data());
             InitializeHeader(&tempHeader, header->GetUncompressedSize());
+
+#ifdef WRITE_COMPRESSED_HEADER
+        // Rewrite the header-less compressed data with a header to a different file name so it can
+        // be used with the original sample code.
+        std::string newFile = sourcePath.filename().string() + "_with_header.data";
+        std::filesystem::path newFilePath = destinationPath;
+        newFilePath.append(newFile);
+        std::ofstream compressedFile(newFilePath, std::ios::binary);
+        compressedFile.write(reinterpret_cast<const char*>(&tempHeader), sizeof(tempHeader));
+        compressedFile.write(reinterpret_cast<const char*>(fileContents.data()), fileContents.size());
+#endif
+
         }
 
         CompressedFileHeader* header =
