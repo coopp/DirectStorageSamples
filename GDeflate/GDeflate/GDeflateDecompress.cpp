@@ -65,6 +65,8 @@ namespace GDeflate
 
         std::atomic_uint32_t globalIndex;
         uint32_t numItems;
+
+        libdeflate_result decompressResult = LIBDEFLATE_SUCCESS;
     };
 
     static void TileDecompressionJob(DecompressionContext& context, uint32_t compressorId)
@@ -74,6 +76,7 @@ namespace GDeflate
         const uint32_t* tileOffsets = reinterpret_cast<const uint32_t*>(context.inputPtr + sizeof(TileStream));
         const uint8_t* inDataPtr = reinterpret_cast<const uint8_t*>(tileOffsets + context.numItems);
 
+        libdeflate_result res = LIBDEFLATE_SUCCESS;
         while (true)
         {
             const uint32_t tileIndex = context.globalIndex.fetch_add(1, std::memory_order_relaxed);
@@ -89,13 +92,22 @@ namespace GDeflate
 
             auto outputOffset = tileIndex * kDefaultTileSize;
 
-            libdeflate_gdeflate_decompress(
+            res = libdeflate_gdeflate_decompress(
                 decompressor.get(),
                 &compressedPage,
                 1,
                 context.outputPtr + outputOffset,
                 static_cast<size_t>(kDefaultTileSize),
                 nullptr);
+
+            if (res != LIBDEFLATE_SUCCESS)
+                break;
+        }
+
+        // Capture this error if one has not already been captured.
+        if (res != LIBDEFLATE_SUCCESS && context.decompressResult == LIBDEFLATE_SUCCESS)
+        {
+            context.decompressResult = res;
         }
     }
 
@@ -154,6 +166,6 @@ namespace GDeflate
                 worker.join();
         }
 
-        return true;
+        return (context.decompressResult == LIBDEFLATE_SUCCESS);
     }
 } // namespace GDeflate

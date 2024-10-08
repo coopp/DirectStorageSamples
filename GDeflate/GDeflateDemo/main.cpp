@@ -1,4 +1,4 @@
-/*
+﻿/*
  * SPDX-FileCopyrightText: Copyright (c) Microsoft Corporation. All rights reserved.
  * SPDX-License-Identifier: MIT
  */
@@ -22,8 +22,18 @@ void ShowHelp()
     std::cout << "\n";
     std::cout << "/compress      Compress a single file or multiple files using the CPU.\n";
     std::cout << "/decompress    Decompress a single file or multiple files using the CPU.\n";
+    std::cout << "/decompressnoheader Decompress a single file or multiple files using the CPU.\n";
+    std::cout << "                    The compressed file is assumed to not have been compressed\n";
+    std::cout << "                    with this sample or contain a header indicating the uncompressed size.\n";
+    std::cout << "                    The uncompressed size will be estimated to be 4X the compressed size.\n";
+    std::cout << "                    to ensure there is enough buffer for decompression.\n";
 #ifdef WIN32
     std::cout << "/decompressgpu Decompress a single file or multiple files using the GPU.\n";
+    std::cout << "/decompressgpunoheader Decompress a single file or multiple files using the GPU.\n";
+    std::cout << "                       The compressed file is assumed to not have been compressed\n";
+    std::cout << "                       with this sample or contain a header indicating the uncompressed size.\n";
+    std::cout << "                       The uncompressed size will be estimated to be 4X the compressed size.\n";
+    std::cout << "                       to ensure there is enough buffer for decompression.\n";
 #endif
     std::cout << "\n";
     std::cout << "/demo          Compress a single file or multiple files using the CPU and\n";
@@ -52,7 +62,9 @@ enum class OperationType
     None,
     Compress,
     DecompressCPU,
+    DecompressCPUNoHeader,
     DecompressGPU,
+    DecompressGPUNoHeader,
     Demo
 };
 
@@ -87,9 +99,17 @@ static Options ParseOptions(int argc, char** argv)
     {
         options.Operation = OperationType::DecompressCPU;
     }
+    else if ((strcasecmp(argv[1], "/decompressnoheader") == 0) || (strcasecmp(argv[1], "-decompressnoheader") == 0))
+    {
+        options.Operation = OperationType::DecompressCPUNoHeader;
+    }
     else if ((strcasecmp(argv[1], "/decompressgpu") == 0) || (strcasecmp(argv[1], "-decompressgpu") == 0))
     {
         options.Operation = OperationType::DecompressGPU;
+    }
+    else if ((strcasecmp(argv[1], "/decompressgpunoheader") == 0) || (strcasecmp(argv[1], "-decompressgpunoheader") == 0))
+    {
+        options.Operation = OperationType::DecompressGPUNoHeader;
     }
     else if ((strcasecmp(argv[1], "/demo") == 0) || (strcasecmp(argv[1], "-demo") == 0))
     {
@@ -125,7 +145,8 @@ static Options ParseOptions(int argc, char** argv)
         }
     }
 
-    if (options.Operation == OperationType::DecompressGPU || options.Operation == OperationType::Demo)
+    if (options.Operation == OperationType::DecompressGPU || options.Operation == OperationType::Demo ||
+        options.Operation == OperationType::DecompressGPUNoHeader)
     {
 #ifdef WIN32
         // Detect if the shaders required for decompression are present.
@@ -220,25 +241,67 @@ int CompressContent(std::vector<std::filesystem::path> const& sourcePaths, std::
     return 0;
 }
 
+#pragma pack(push, 1)
+struct GDeflateTileStream
+{
+    uint8_t id;
+    uint8_t magic;
+
+    uint16_t numTiles;
+
+    uint32_t tileSizeIdx : 2; // this must be set to 1
+    uint32_t lastTileSize : 18;
+    uint32_t reserved1 : 12;
+
+    bool IsValid() const
+    {
+        return id == (magic ^ 0xff);
+    }
+
+    size_t GetUncompressedSize() const
+    {
+        constexpr size_t kDefaultTileSize = 64 * 1024; /*!< Default tile size */
+        return numTiles * kDefaultTileSize - (lastTileSize == 0 ? 0 : kDefaultTileSize - lastTileSize);
+    }
+};
+#pragma pack(pop)
+
 int DecompressContent(
     std::vector<std::filesystem::path> const& sourcePaths,
-    std::filesystem::path const& destinationPath)
+    std::filesystem::path const& destinationPath,
+    bool hasHeader)
 {
-    std::cout << "\nDecompressing " << sourcePaths.size() << " file(s) (using the CPU)\n";
+    std::cout << "\nDecompressing " << sourcePaths.size() << " file(s) (using the CPU) "
+        << (hasHeader ? "(has header)" : "(no header)") << "\n";
 
     for (auto& sourcePath : sourcePaths)
     {
         auto fileContents = ReadEntireFileContent(sourcePath);
-        CompressedFileHeader* header = reinterpret_cast<CompressedFileHeader*>(fileContents.data());
+
+        // If the content has no header, we can grab the uncompressed size from the
+        // file contents.
+        CompressedFileHeader tempHeader;
+        if (!hasHeader)
+        {
+            auto header = reinterpret_cast<const GDeflateTileStream*>(fileContents.data());
+            InitializeHeader(&tempHeader, header->GetUncompressedSize());
+        }
+
+        CompressedFileHeader* header =
+            hasHeader ? reinterpret_cast<CompressedFileHeader*>(fileContents.data()) : &tempHeader;
         if (!IsValidHeader(header))
         {
             std::cout << "Invalid compressed file format. The compressed file is expected to have\n"
-                         "been compressed using this sample.\n";
+                            "been compressed using this sample.\n";
             return -1;
         }
 
-        size_t compressedDataSize = fileContents.size() - sizeof(CompressedFileHeader);
+        size_t compressedDataSize = hasHeader ? (fileContents.size() - sizeof(CompressedFileHeader)) : fileContents.size();
         std::vector<uint8_t> uncompressedContents(header->UncompressedSize);
+
+        // To see if the uncompressed contents are being written to, memset the output to all 1's.
+        memset(uncompressedContents.data(), 1, uncompressedContents.size());
+
         std::cout << "Decompressing " << sourcePath.string() << " to " << destinationPath.string() << "...\n";
         std::cout << "Compressed Size: " << compressedDataSize << " bytes, ";
         std::cout << "Uncompressed Size: " << header->UncompressedSize << " bytes\n";
@@ -246,7 +309,7 @@ int DecompressContent(
         if (!GDeflate::Decompress(
                 uncompressedContents.data(),
                 uncompressedContents.size(),
-                fileContents.data() + sizeof(CompressedFileHeader),
+                hasHeader ? (fileContents.data() + sizeof(CompressedFileHeader)) : fileContents.data(),
                 compressedDataSize,
                 1))
         {
@@ -318,11 +381,14 @@ DeviceInfo GetDeviceInfo(ID3D12Device5* device)
 int DecompressContentUsingGPU(
     std::vector<std::filesystem::path> const& sourcePaths,
     std::filesystem::path const& destinationPath,
-    std::filesystem::path const& shaderPath)
+    std::filesystem::path const& shaderPath,
+    bool hasHeader)
 {
     using namespace winrt;
 
-    std::cout << "\nDecompressing " << sourcePaths.size() << " file(s) (using the GPU)\n";
+    std::cout << "\nDecompressing " << sourcePaths.size() << " file(s) (using the GPU) "
+              << (hasHeader ? "(has header)" : "(no header)") << "\n";
+    ;
 
     if (sourcePaths.empty())
         return 0;
@@ -362,14 +428,32 @@ int DecompressContentUsingGPU(
     for (auto& sourcePath : sourcePaths)
     {
         auto fileContents = ReadEntireFileContent(sourcePath);
-        CompressedFileHeader* header = reinterpret_cast<CompressedFileHeader*>(fileContents.data());
+
+        CompressedFileHeader tempHeader;
+        InitializeHeader(&tempHeader, fileContents.size() * 4);
+
+        CompressedFileHeader* header =
+            hasHeader ? reinterpret_cast<CompressedFileHeader*>(fileContents.data()) : &tempHeader;
         if (!IsValidHeader(header))
         {
             std::cout << "Invalid compressed file format. The compressed file " << sourcePath.string() << "\n"
                       << "is expected to have been compressed using this sample.\n";
             return -1;
         }
-        buffers.push_back(std::move(fileContents));
+
+        if (hasHeader)
+        {
+            buffers.push_back(std::move(fileContents));
+        }
+        else
+        {
+            // Construct a new buffer that includes the generated header above to keep the rest of the code
+            // working as-is
+            std::vector<uint8_t> newBuffer(sizeof(CompressedFileHeader) + fileContents.size());
+            memcpy(newBuffer.data(), header, sizeof(CompressedFileHeader));
+            memcpy(newBuffer.data() + sizeof(CompressedFileHeader), fileContents.data(), fileContents.size());
+            buffers.push_back(std::move(newBuffer));
+        }
     }
 
     auto uncompressedData = GpuDecompressor->Decompress(buffers);
@@ -439,7 +523,7 @@ int DemoCompressionAndDecompression(
     }
 
     // Decompress using the CPU
-    result = DecompressContent(compressedSourcePaths, destinationPath);
+    result = DecompressContent(compressedSourcePaths, destinationPath, true);
     if (result < 0)
         return result;
 
@@ -452,7 +536,7 @@ int DemoCompressionAndDecompression(
 
 #ifdef WIN32
     // Decompress using the GPU
-    result = DecompressContentUsingGPU(compressedSourcePaths, destinationPath, shaderPath);
+    result = DecompressContentUsingGPU(compressedSourcePaths, destinationPath, shaderPath, true);
     if (result < 0)
         return result;
 
@@ -513,17 +597,22 @@ int main(int argc, char** argv)
 
     std::vector<std::filesystem::path> sourcePaths = CollectSourcePaths(
         options.SourcePath,
-        (options.Operation == OperationType::DecompressCPU || options.Operation == OperationType::DecompressGPU));
+        (options.Operation == OperationType::DecompressCPU || options.Operation == OperationType::DecompressGPU || 
+         options.Operation == OperationType::DecompressCPUNoHeader || options.Operation == OperationType::DecompressGPUNoHeader));
 
     switch (options.Operation)
     {
     case OperationType::Compress:
         return CompressContent(sourcePaths, options.DestinationPath);
     case OperationType::DecompressCPU:
-        return DecompressContent(sourcePaths, options.DestinationPath);
+        return DecompressContent(sourcePaths, options.DestinationPath, true);
+    case OperationType::DecompressCPUNoHeader:
+        return DecompressContent(sourcePaths, options.DestinationPath, false);
 #ifdef WIN32
     case OperationType::DecompressGPU:
-        return DecompressContentUsingGPU(sourcePaths, options.DestinationPath, options.ShaderPath);
+        return DecompressContentUsingGPU(sourcePaths, options.DestinationPath, options.ShaderPath, true);
+    case OperationType::DecompressGPUNoHeader:
+        return DecompressContentUsingGPU(sourcePaths, options.DestinationPath, options.ShaderPath, false);
 #endif
     case OperationType::Demo:
         return DemoCompressionAndDecompression(sourcePaths, options.DestinationPath, options.ShaderPath);
