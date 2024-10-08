@@ -66,7 +66,7 @@ namespace GDeflate
         std::atomic_uint32_t globalIndex;
         uint32_t numItems;
 
-        libdeflate_result decompressResult = LIBDEFLATE_SUCCESS;
+        std::atomic_bool failed;
     };
 
     static void TileDecompressionJob(DecompressionContext& context, uint32_t compressorId)
@@ -76,7 +76,7 @@ namespace GDeflate
         const uint32_t* tileOffsets = reinterpret_cast<const uint32_t*>(context.inputPtr + sizeof(TileStream));
         const uint8_t* inDataPtr = reinterpret_cast<const uint8_t*>(tileOffsets + context.numItems);
 
-        libdeflate_result res = LIBDEFLATE_SUCCESS;
+        libdeflate_result decompressResult = LIBDEFLATE_SUCCESS;
         while (true)
         {
             const uint32_t tileIndex = context.globalIndex.fetch_add(1, std::memory_order_relaxed);
@@ -92,7 +92,7 @@ namespace GDeflate
 
             auto outputOffset = tileIndex * kDefaultTileSize;
 
-            res = libdeflate_gdeflate_decompress(
+            decompressResult = libdeflate_gdeflate_decompress(
                 decompressor.get(),
                 &compressedPage,
                 1,
@@ -100,14 +100,11 @@ namespace GDeflate
                 static_cast<size_t>(kDefaultTileSize),
                 nullptr);
 
-            if (res != LIBDEFLATE_SUCCESS)
+            if ( decompressResult != LIBDEFLATE_SUCCESS)
+            {
+                context.failed = true;
                 break;
-        }
-
-        // Capture this error if one has not already been captured.
-        if (res != LIBDEFLATE_SUCCESS && context.decompressResult == LIBDEFLATE_SUCCESS)
-        {
-            context.decompressResult = res;
+            }
         }
     }
 
@@ -145,6 +142,8 @@ namespace GDeflate
         context.globalIndex = 0;
         context.numItems = header->numTiles;
 
+        context.failed = false;
+
         uint32_t numWorkersLeft = context.numItems > (2 * numWorkers) ? numWorkers : 1;
         const uint32_t compressorId = header->id;
 
@@ -166,6 +165,6 @@ namespace GDeflate
                 worker.join();
         }
 
-        return (context.decompressResult == LIBDEFLATE_SUCCESS);
+        return (!context.failed);
     }
 } // namespace GDeflate
