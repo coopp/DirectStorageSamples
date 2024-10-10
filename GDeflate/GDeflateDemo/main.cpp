@@ -444,7 +444,8 @@ int DecompressContentUsingGPU(
         auto fileContents = ReadEntireFileContent(sourcePath);
 
         CompressedFileHeader tempHeader;
-        InitializeHeader(&tempHeader, fileContents.size() * 4);
+        auto streamheader = reinterpret_cast<const GDeflateTileStream*>(fileContents.data());
+        InitializeHeader(&tempHeader, streamheader->GetUncompressedSize());
 
         CompressedFileHeader* header =
             hasHeader ? reinterpret_cast<CompressedFileHeader*>(fileContents.data()) : &tempHeader;
