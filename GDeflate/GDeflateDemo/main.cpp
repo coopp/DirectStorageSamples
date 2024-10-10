@@ -266,7 +266,7 @@ struct GDeflateTileStream
 };
 #pragma pack(pop)
 
-#define WRITE_COMPRESSED_HEADER
+// #define WRITE_COMPRESSED_HEADER
 
 int DecompressContent(
     std::vector<std::filesystem::path> const& sourcePaths,
